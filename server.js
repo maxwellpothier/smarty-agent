@@ -17,6 +17,13 @@ if (!REPO_PATH) {
 }
 
 /**
+ * Check if the repository is ready (clone complete)
+ */
+function isRepoReady() {
+  return fs.existsSync(path.join(REPO_PATH, ".git"));
+}
+
+/**
  * Slugify a request string for use as a branch name
  */
 function slugify(text) {
@@ -193,6 +200,13 @@ async function handleChangeRequest(req, res) {
   req.on("end", async () => {
     let imagePaths = [];
     try {
+      // Check if repo is ready
+      if (!isRepoReady()) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Repository is still cloning. Please try again in a moment." }));
+        return;
+      }
+
       const { request, images } = JSON.parse(body);
 
       if (!request || typeof request !== "string") {
@@ -312,7 +326,7 @@ Focus only on making the requested changes. Do not make unrelated modifications.
  */
 function handleHealth(req, res) {
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ status: "ok" }));
+  res.end(JSON.stringify({ status: "ok", repo_ready: isRepoReady() }));
 }
 
 /**

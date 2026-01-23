@@ -42,21 +42,24 @@ git config --global user.email "claude-agent@example.com"
 git config --global user.name "Claude Agent"
 git config --global init.defaultBranch master
 
-# Clone repository if not present
-if [ ! -d "$REPO_PATH" ]; then
-    echo "Cloning repository ${BB_WORKSPACE}/${BB_REPO}..."
-    cd /workspace
-    git clone "https://${BB_USERNAME}:${BB_API_TOKEN}@bitbucket.org/${BB_WORKSPACE}/${BB_REPO}.git"
-else
-    echo "Repository already exists at $REPO_PATH"
-fi
-
-# Configure git to use credentials for push operations
-cd "$REPO_PATH"
-git remote set-url origin "https://${BB_USERNAME}:${BB_API_TOKEN}@bitbucket.org/${BB_WORKSPACE}/${BB_REPO}.git"
-
 # Export repo path for the server
 export REPO_PATH="$REPO_PATH"
+
+# Clone repository in background if not present
+if [ ! -d "$REPO_PATH" ]; then
+    echo "Cloning repository ${BB_WORKSPACE}/${BB_REPO} in background..."
+    (
+        cd /workspace
+        git clone "https://${BB_USERNAME}:${BB_API_TOKEN}@bitbucket.org/${BB_WORKSPACE}/${BB_REPO}.git"
+        cd "$REPO_PATH"
+        git remote set-url origin "https://${BB_USERNAME}:${BB_API_TOKEN}@bitbucket.org/${BB_WORKSPACE}/${BB_REPO}.git"
+        echo "Repository clone complete!"
+    ) &
+else
+    echo "Repository already exists at $REPO_PATH"
+    cd "$REPO_PATH"
+    git remote set-url origin "https://${BB_USERNAME}:${BB_API_TOKEN}@bitbucket.org/${BB_WORKSPACE}/${BB_REPO}.git"
+fi
 
 # Start the server
 echo "Starting server on port ${PORT:-3000}..."
