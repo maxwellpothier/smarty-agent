@@ -38,7 +38,7 @@ REPO_PATH="/workspace/$BB_REPO"
 
 # Configure git
 echo "Configuring git..."
-git config --global user.email "claude-agent@example.com"
+git config --global user.email "${BB_EMAIL}"
 git config --global user.name "Claude Agent"
 git config --global init.defaultBranch master
 
@@ -46,13 +46,15 @@ git config --global init.defaultBranch master
 export REPO_PATH="$REPO_PATH"
 
 # Clone repository in background if not present
-if [ ! -d "$REPO_PATH" ]; then
+if [ ! -f "$REPO_PATH/.clone-complete" ]; then
     echo "Cloning repository ${BB_WORKSPACE}/${BB_REPO} in background..."
+    rm -rf "$REPO_PATH" 2>/dev/null || true
     (
         cd /workspace
         git clone "https://${BB_USERNAME}:${BB_API_TOKEN}@bitbucket.org/${BB_WORKSPACE}/${BB_REPO}.git"
         cd "$REPO_PATH"
         git remote set-url origin "https://${BB_USERNAME}:${BB_API_TOKEN}@bitbucket.org/${BB_WORKSPACE}/${BB_REPO}.git"
+        touch .clone-complete
         echo "Repository clone complete!"
     ) &
 else
