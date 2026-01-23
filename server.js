@@ -4,6 +4,11 @@ const path = require("path");
 
 const PORT = process.env.PORT || 3000;
 const REPO_PATH = process.env.REPO_PATH;
+const BB_USERNAME = process.env.BB_USERNAME;
+const BB_EMAIL = process.env.BB_EMAIL;
+const BB_API_TOKEN = process.env.BB_API_TOKEN;
+const BB_WORKSPACE = process.env.BB_WORKSPACE;
+const BB_REPO = process.env.BB_REPO;
 
 if (!REPO_PATH) {
   console.error("ERROR: REPO_PATH environment variable is required");
@@ -97,6 +102,46 @@ async function runClaudeCode(prompt) {
 }
 
 /**
+ * Create a pull request via Bitbucket API
+ */
+async function createBitbucketPR(sourceBranch, title, description) {
+  const url = `https://api.bitbucket.org/2.0/repositories/${BB_WORKSPACE}/${BB_REPO}/pullrequests`;
+  const auth = Buffer.from(`${BB_EMAIL}:${BB_API_TOKEN}`).toString("base64");
+
+  const body = JSON.stringify({
+    title: title,
+    description: description,
+    source: {
+      branch: {
+        name: sourceBranch,
+      },
+    },
+    destination: {
+      branch: {
+        name: "master",
+      },
+    },
+  });
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/json",
+    },
+    body: body,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Bitbucket API error (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json();
+  return data.links.html.href;
+}
+
+/**
  * Handle POST / - Process a code change request
  */
 async function handleChangeRequest(req, res) {
@@ -170,14 +215,12 @@ Focus only on making the requested changes. Do not make unrelated modifications.
       console.log(`Pushing branch ${currentBranch}...`);
       execInRepo(`git push -u origin "${currentBranch}"`);
 
-      // Create PR
+      // Create PR via Bitbucket API
       console.log("Creating pull request...");
       const prTitle = request.substring(0, 100);
-      const prBody = `## Description\n\n${request}\n\n---\n*This PR was automatically created by Smarty Agent using Claude Code.*`;
+      const prDescription = `## Description\n\n${request}\n\n---\n*This PR was automatically created by Smarty Agent using Claude Code.*`;
 
-      const prUrl = execInRepo(
-        `gh pr create --title "${prTitle.replace(/"/g, '\\"')}" --body "${prBody.replace(/"/g, '\\"')}" --base master`
-      );
+      const prUrl = await createBitbucketPR(currentBranch, prTitle, prDescription);
 
       console.log(`\n=== PR created: ${prUrl} ===\n`);
 
