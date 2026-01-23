@@ -1,6 +1,7 @@
 const http = require("http");
 const { spawn, execSync } = require("child_process");
 const path = require("path");
+const fs = require("fs");
 
 const PORT = process.env.PORT || 3000;
 const REPO_PATH = process.env.REPO_PATH;
@@ -47,9 +48,41 @@ function getCurrentBranch() {
 }
 
 /**
+ * Save base64 images to temp files and return their paths
+ */
+function saveImages(images) {
+  const tempDir = path.join(REPO_PATH, ".claude-temp-images");
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+
+  const savedPaths = [];
+  images.forEach((img, index) => {
+    const ext = img.name ? path.extname(img.name) : ".png";
+    const filename = img.name || `image-${index}${ext}`;
+    const filepath = path.join(tempDir, filename);
+    const buffer = Buffer.from(img.data, "base64");
+    fs.writeFileSync(filepath, buffer);
+    savedPaths.push(filepath);
+  });
+
+  return savedPaths;
+}
+
+/**
+ * Clean up temp images directory
+ */
+function cleanupImages() {
+  const tempDir = path.join(REPO_PATH, ".claude-temp-images");
+  if (fs.existsSync(tempDir)) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Run Claude Code with restricted permissions
  */
-async function runClaudeCode(prompt) {
+async function runClaudeCode(prompt, imagePaths = []) {
   return new Promise((resolve, reject) => {
     const args = [
       "--print",
@@ -59,11 +92,17 @@ async function runClaudeCode(prompt) {
       "--allowedTools",
       "Edit",
       "Write",
+      "Read",
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "-p",
       prompt,
     ];
+
+    // Add image paths as additional arguments
+    imagePaths.forEach((imgPath) => {
+      args.push(imgPath);
+    });
 
     const proc = spawn("claude", args, {
       cwd: REPO_PATH,
@@ -152,8 +191,9 @@ async function handleChangeRequest(req, res) {
   });
 
   req.on("end", async () => {
+    let imagePaths = [];
     try {
-      const { request } = JSON.parse(body);
+      const { request, images } = JSON.parse(body);
 
       if (!request || typeof request !== "string") {
         res.writeHead(400, { "Content-Type": "application/json" });
@@ -162,6 +202,13 @@ async function handleChangeRequest(req, res) {
       }
 
       console.log(`\n=== Processing request: ${request} ===\n`);
+
+      // Save images if provided
+      if (images && Array.isArray(images) && images.length > 0) {
+        console.log(`Saving ${images.length} image(s)...`);
+        imagePaths = saveImages(images);
+        console.log(`Images saved to: ${imagePaths.join(", ")}`);
+      }
 
       // Fetch latest and checkout master
       console.log("Fetching latest from origin...");
@@ -175,11 +222,20 @@ async function handleChangeRequest(req, res) {
       console.log(`Creating branch: ${branchName}`);
       execInRepo(`git checkout -b "${branchName}"`);
 
-      // Run Claude Code
-      console.log("Running Claude Code...");
-      const claudePrompt = `You are helping to make code changes to this repository.
+      // Build prompt with image references
+      let claudePrompt = `You are helping to make code changes to this repository.
 
-Request: ${request}
+Request: ${request}`;
+
+      if (imagePaths.length > 0) {
+        claudePrompt += `\n\nThe following reference image(s) have been provided to help you understand the request:\n`;
+        imagePaths.forEach((imgPath, index) => {
+          claudePrompt += `- Image ${index + 1}: ${imgPath}\n`;
+        });
+        claudePrompt += `\nPlease examine these images to understand what changes are needed.`;
+      }
+
+      claudePrompt += `
 
 Please make the necessary code changes to fulfill this request. After making changes:
 1. Use git add to stage your changes
@@ -187,7 +243,9 @@ Please make the necessary code changes to fulfill this request. After making cha
 
 Focus only on making the requested changes. Do not make unrelated modifications.`;
 
-      await runClaudeCode(claudePrompt);
+      // Run Claude Code
+      console.log("Running Claude Code...");
+      await runClaudeCode(claudePrompt, imagePaths);
 
       // Safety check: verify we're on a claude/* branch before pushing
       const currentBranch = getCurrentBranch();
@@ -239,6 +297,12 @@ Focus only on making the requested changes. Do not make unrelated modifications.
           error: error.message,
         })
       );
+    } finally {
+      // Clean up temp images
+      if (imagePaths.length > 0) {
+        console.log("Cleaning up temp images...");
+        cleanupImages();
+      }
     }
   });
 }

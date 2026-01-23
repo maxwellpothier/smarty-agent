@@ -73,6 +73,20 @@ Submit a code change request. Claude Code will make the changes and create a PR.
 }
 ```
 
+**Request with images:**
+
+```json
+{
+  "request": "Update the button styling to match this design",
+  "images": [
+    {
+      "name": "design-mockup.png",
+      "data": "base64-encoded-image-data..."
+    }
+  ]
+}
+```
+
 **Response:**
 
 ```json
