@@ -51,7 +51,7 @@ if [ ! -f "$REPO_PATH/.clone-complete" ]; then
     rm -rf "$REPO_PATH" 2>/dev/null || true
     (
         cd /workspace
-        git clone "https://${BB_USERNAME}:${BB_API_TOKEN}@bitbucket.org/${BB_WORKSPACE}/${BB_REPO}.git"
+        git clone --depth 1 "https://${BB_USERNAME}:${BB_API_TOKEN}@bitbucket.org/${BB_WORKSPACE}/${BB_REPO}.git"
         cd "$REPO_PATH"
         git remote set-url origin "https://${BB_USERNAME}:${BB_API_TOKEN}@bitbucket.org/${BB_WORKSPACE}/${BB_REPO}.git"
         touch .clone-complete

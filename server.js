@@ -5,6 +5,7 @@ const fs = require("fs");
 
 const PORT = process.env.PORT || 3000;
 const REPO_PATH = process.env.REPO_PATH;
+const API_KEY = process.env.API_KEY;
 const BB_USERNAME = process.env.BB_USERNAME;
 const BB_EMAIL = process.env.BB_EMAIL;
 const BB_API_TOKEN = process.env.BB_API_TOKEN;
@@ -16,15 +17,31 @@ if (!REPO_PATH) {
   process.exit(1);
 }
 
+if (!API_KEY) {
+  console.error("ERROR: API_KEY environment variable is required");
+  process.exit(1);
+}
+
+const ALLOWED_ORIGINS = [
+  "http://localhost:3220",
+  "https://localhost:3220",
+  "https://www.smarty.com",
+];
+
+// Rate limiting: track requests per IP
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+const RATE_LIMIT_MAX_REQUESTS = 5; // max requests per day
+
 /**
  * Check if the repository is ready (clone complete)
  */
 function isRepoReady() {
-  return fs.existsSync(path.join(REPO_PATH, ".git"));
+  return fs.existsSync(path.join(REPO_PATH, ".clone-complete"));
 }
 
 /**
- * Slugify a request string for use as a branch name
+ * Slugify text for use as a branch name
  */
 function slugify(text) {
   return text
@@ -32,8 +49,55 @@ function slugify(text) {
     .trim()
     .replace(/[^\w\s-]/g, "")
     .replace(/[\s_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .substring(0, 50);
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Generate a short branch name from a request using Claude
+ */
+async function generateBranchName(request) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("claude", [
+      "--print",
+      "--model", "haiku",
+      "-p",
+      `Generate a short git branch name (2-4 words, lowercase, hyphen-separated) that captures the essence of this request. Output ONLY the branch name, nothing else.
+
+Request: ${request}
+
+Examples of good branch names:
+- "fix-login-bug"
+- "add-user-avatar"
+- "update-pricing-page"
+- "refactor-auth-flow"`
+    ], {
+      cwd: REPO_PATH,
+      env: {
+        ...process.env,
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    proc.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    proc.on("close", (code) => {
+      if (code === 0) {
+        const branchName = slugify(stdout.trim()).substring(0, 40);
+        resolve(branchName || slugify(request).substring(0, 30));
+      } else {
+        // Fallback to simple slugify if LLM fails
+        resolve(slugify(request).substring(0, 30));
+      }
+    });
+
+    proc.on("error", () => {
+      resolve(slugify(request).substring(0, 30));
+    });
+  });
 }
 
 /**
@@ -231,7 +295,7 @@ async function handleChangeRequest(req, res) {
       execInRepo("git reset --hard origin/master");
 
       // Create new branch
-      const slug = slugify(request);
+      const slug = await generateBranchName(request);
       const branchName = `claude/${slug}-${Date.now()}`;
       console.log(`Creating branch: ${branchName}`);
       execInRepo(`git checkout -b "${branchName}"`);
@@ -330,12 +394,47 @@ function handleHealth(req, res) {
 }
 
 /**
- * Set CORS headers on response
+ * Set CORS headers on response based on origin
  */
-function setCorsHeaders(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+function setCorsHeaders(req, res) {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+/**
+ * Check if request has valid API key
+ */
+function isAuthenticated(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return false;
+  }
+  const token = authHeader.slice(7);
+  return token === API_KEY;
+}
+
+/**
+ * Check rate limit for IP, returns true if allowed
+ */
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const record = rateLimitMap.get(ip);
+
+  if (!record || now - record.windowStart > RATE_LIMIT_WINDOW_MS) {
+    rateLimitMap.set(ip, { windowStart: now, count: 1 });
+    return true;
+  }
+
+  if (record.count >= RATE_LIMIT_MAX_REQUESTS) {
+    return false;
+  }
+
+  record.count++;
+  return true;
 }
 
 /**
@@ -343,8 +442,9 @@ function setCorsHeaders(res) {
  */
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  const clientIp = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket.remoteAddress;
 
-  setCorsHeaders(res);
+  setCorsHeaders(req, res);
 
   // Handle preflight requests
   if (req.method === "OPTIONS") {
@@ -353,9 +453,27 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Health endpoint doesn't require auth
   if (req.method === "GET" && url.pathname === "/health") {
     handleHealth(req, res);
-  } else if (req.method === "POST" && url.pathname === "/") {
+    return;
+  }
+
+  // All other endpoints require authentication
+  if (!isAuthenticated(req)) {
+    res.writeHead(401, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Unauthorized" }));
+    return;
+  }
+
+  // Rate limiting
+  if (!checkRateLimit(clientIp)) {
+    res.writeHead(429, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Too many requests. Please try again later." }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/") {
     handleChangeRequest(req, res);
   } else {
     res.writeHead(404, { "Content-Type": "application/json" });
